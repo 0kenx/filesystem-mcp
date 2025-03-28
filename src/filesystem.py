@@ -140,168 +140,85 @@ def get_file_stats(file_path: str) -> Dict[str, Any]:
         "permissions": oct(stats.st_mode)[-3:],
     }
 
-def normalize_line_endings(text: str) -> str:
-    return text.replace('\r\n', '\n')
-
-def create_unified_diff(original_content: str, new_content: str, filepath: str = 'file') -> str:
-    # Ensure consistent line endings for diff
-    normalized_original = normalize_line_endings(original_content)
-    normalized_new = normalize_line_endings(new_content)
-    
-    diff = difflib.unified_diff(
-        normalized_original.splitlines(),
-        normalized_new.splitlines(),
-        fromfile=f"{filepath} (original)",
-        tofile=f"{filepath} (modified)",
-        lineterm=''
-    )
-    
-    return '\n'.join(diff)
-
-def apply_file_edits(
-    file_path: str,
-    edits: List[Dict[str, str]],
-    dry_run: bool = False
-) -> str:
-    # Read file content and normalize line endings
-    with open(file_path, 'r', encoding='utf-8') as f:
-        content = normalize_line_endings(f.read())
-    
-    # Apply edits sequentially
-    modified_content = content
-    for edit in edits:
-        normalized_old = normalize_line_endings(edit['oldText'])
-        normalized_new = normalize_line_endings(edit['newText'])
-        
-        # If exact match exists, use it
-        if normalized_old in modified_content:
-            modified_content = modified_content.replace(normalized_old, normalized_new)
-            continue
-        
-        # Otherwise, try line-by-line matching with flexibility for whitespace
-        old_lines = normalized_old.split('\n')
-        content_lines = modified_content.split('\n')
-        match_found = False
-        
-        for i in range(len(content_lines) - len(old_lines) + 1):
-            potential_match = content_lines[i:i + len(old_lines)]
-            
-            # Compare lines with normalized whitespace
-            is_match = all(
-                old_line.strip() == content_line.strip()
-                for old_line, content_line in zip(old_lines, potential_match)
-            )
-            
-            if is_match:
-                # Preserve original indentation of first line
-                original_indent = content_lines[i].split(content_lines[i].lstrip())[0] if content_lines[i] else ''
-                new_lines = []
-                
-                for j, line in enumerate(normalized_new.split('\n')):
-                    if j == 0:
-                        new_lines.append(original_indent + line.lstrip())
-                    else:
-                        # For subsequent lines, try to preserve relative indentation
-                        if j < len(old_lines):
-                            old_indent = old_lines[j].split(old_lines[j].lstrip())[0] if old_lines[j] else ''
-                            new_indent = line.split(line.lstrip())[0] if line else ''
-                            if old_indent and new_indent:
-                                relative_indent = max(0, len(new_indent) - len(old_indent))
-                                new_lines.append(original_indent + ' ' * relative_indent + line.lstrip())
-                            else:
-                                new_lines.append(line)
-                        else:
-                            new_lines.append(line)
-                
-                content_lines[i:i + len(old_lines)] = new_lines
-                modified_content = '\n'.join(content_lines)
-                match_found = True
-                break
-        
-        if not match_found:
-            raise ValueError(f"Could not find exact match for edit:\n{edit['oldText']}")
-    
-    # Create unified diff
-    diff = create_unified_diff(content, modified_content, file_path)
-    
-    # Format diff with appropriate number of backticks
-    num_backticks = 3
-    while '`' * num_backticks in diff:
-        num_backticks += 1
-    formatted_diff = f"{('`' * num_backticks)}diff\n{diff}\n{('`' * num_backticks)}\n\n"
-    
-    if not dry_run:
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(modified_content)
-    
-    return formatted_diff
-
-# Directory tree formatting function
-def format_directory_tree(root_path, root_name, include_files=None, count_lines=False):
+# Common function for getting file metadata
+def get_metadata(path, is_file, count_lines=False, show_permissions=False, show_owner=False, show_size=False):
     """
-    Common helper function to format a directory tree in plaintext.
+    Get formatted metadata for a file or directory.
     
     Args:
-        root_path: The base path to start the tree from
-        root_name: The name to display for the root node
-        include_files: Function that determines if a file should be included (None = include all)
+        path: The path to get metadata for
+        is_file: Whether this is a file (True) or directory (False)
         count_lines: Whether to include line count for files
-    
+        show_permissions: Whether to include permissions
+        show_owner: Whether to include owner/group info
+        show_size: Whether to include size info
+        
     Returns:
-        A formatted string representation of the directory tree
+        A comma-separated string of metadata, or empty string if no metadata requested
     """
-    lines = [root_name]
+    import pwd
+    import grp
     
-    def format_tree(current_path, prefix=""):
-        # Get and sort entries
-        try:
-            entries = sorted(os.listdir(current_path))
-        except PermissionError:
-            return [f"{prefix}├── Error: Permission denied"]
-        except Exception as e:
-            return [f"{prefix}├── Error: {str(e)}"]
-            
-        result = []
+    metadata_parts = []
+    
+    try:
+        stats = os.stat(path)
         
-        for i, entry in enumerate(entries):
-            entry_path = os.path.join(current_path, entry)
-            is_last = (i == len(entries) - 1)
-            
-            # Check if we should include this file
-            if include_files is not None and not os.path.isdir(entry_path):
-                if not include_files(os.path.relpath(entry_path, root_path)):
-                    continue
-            
-            # Add the current entry with proper prefix
-            connector = "└── " if is_last else "├── "
-            
-            if os.path.isdir(entry_path):
-                # Directory entries
-                result.append(f"{prefix}{connector}{entry}/")
-                
-                # Process subdirectory
-                child_prefix = prefix + ("    " if is_last else "│   ")
-                children = format_tree(entry_path, child_prefix)
-                result.extend(children)
+        if show_size:
+            # Format size in human-readable format
+            size_bytes = stats.st_size
+            if size_bytes < 1024:
+                size_str = f"{size_bytes}B"
+            elif size_bytes < 1024 * 1024:
+                size_str = f"{size_bytes/1024:.1f}KB"
+            elif size_bytes < 1024 * 1024 * 1024:
+                size_str = f"{size_bytes/(1024*1024):.1f}MB"
             else:
-                # File entries
-                if count_lines:
-                    try:
-                        with open(entry_path, 'r', encoding='utf-8') as f:
-                            line_count = sum(1 for _ in f)
-                        result.append(f"{prefix}{connector}{entry} [{line_count} lines]")
-                    except Exception:
-                        # Handle binary files or other reading errors
-                        result.append(f"{prefix}{connector}{entry} [binary]")
-                else:
-                    result.append(f"{prefix}{connector}{entry}")
+                size_str = f"{size_bytes/(1024*1024*1024):.1f}GB"
+            metadata_parts.append(size_str)
         
-        return result
-    
-    # Add all children
-    lines.extend(format_tree(root_path))
-    
-    return "\n".join(lines)
+        if show_permissions:
+            # Format permissions similar to ls -l
+            perms = ""
+            mode = stats.st_mode
+            perms += "d" if os.path.isdir(path) else "-"
+            perms += "r" if mode & 0o400 else "-"
+            perms += "w" if mode & 0o200 else "-"
+            perms += "x" if mode & 0o100 else "-"
+            perms += "r" if mode & 0o040 else "-"
+            perms += "w" if mode & 0o020 else "-"
+            perms += "x" if mode & 0o010 else "-"
+            perms += "r" if mode & 0o004 else "-"
+            perms += "w" if mode & 0o002 else "-"
+            perms += "x" if mode & 0o001 else "-"
+            metadata_parts.append(perms)
+        
+        if show_owner:
+            try:
+                # Get username and group
+                user = pwd.getpwuid(stats.st_uid).pw_name
+                group = grp.getgrgid(stats.st_gid).gr_name
+                metadata_parts.append(f"{user}:{group}")
+            except (KeyError, ImportError):
+                # Fallback if lookup fails
+                metadata_parts.append(f"{stats.st_uid}:{stats.st_gid}")
+                
+        # Add line count for files
+        if count_lines and is_file:
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    line_count = sum(1 for _ in f)
+                metadata_parts.append(f"{line_count} lines")
+            except Exception:
+                # Handle binary files or other reading errors
+                metadata_parts.append("binary")
+                
+    except Exception as e:
+        if show_size or show_permissions or show_owner:
+            metadata_parts.append(f"Error: {str(e)}")
+            
+    return ", ".join(metadata_parts)
+
 
 
 # Define tool implementations
@@ -569,25 +486,400 @@ def write_file(path: str, content: str) -> str:
         f.write(content)
     return f"Successfully wrote to {path}"
 
-@dataclass
-class EditOperation:
-    """Edit operation for applying changes to a file"""
-    oldText: str
-    newText: str
-
 @mcp.tool()
-def edit_file(path: str, edits: List[EditOperation], dryRun: bool = False) -> str:
+def edit_file_diff(path: str, replacements: Dict[str, str] = None, inserts: Dict[str, str] = None, 
+                 replace_all: bool = True, dry_run: bool = False) -> str:
     """
-    Make line-based edits to a text file. Each edit replaces exact line sequences
-    with new content. Returns a git-style diff showing the changes made.
-    Only works within allowed directories.
+    Edit a file by replacing existing content with new content without specifying line numbers.
+    
+    Args:
+        path: Path to the file to edit
+        replacements: Dictionary where keys are existing content to find and values are new content to replace it with
+        inserts: Dictionary of insertions with the following format:
+                - key: Existing content to find (or special cases)
+                - value: New content to insert after the found content
+                Special insertion keys:
+                - Empty string "": Insert at the BEGINNING of the file
+                - Any existing content: Insert after that content
+        replace_all: If True, replace all occurrences of the text; if False, replace only the first occurrence
+        dry_run: If True, only validate but don't apply changes
+        
+    Returns:
+        A message indicating the changes applied or validation result
+    
+    Example:
+        edit_file_diff(
+            "myfile.py",
+            replacements={
+                "def old_function():\\n    return False\\n": "def new_function():\\n    return True\\n",
+                "MAX_RETRIES = 3": "MAX_RETRIES = 5"
+            },
+            inserts={
+                "": "# Insert comment at beginning of file\\n",
+                "import os": "import sys\\nimport logging\\n",
+                "def main():": "    # Main function follows\\n",
+                "return result  # last line": "# End of file\\n"
+            },
+            replace_all=False
+        )
     """
     validated_path = validate_path(path)
-    # Convert EditOperation objects to dictionaries
-    edit_dicts = [{"oldText": edit.oldText, "newText": edit.newText} for edit in edits]
-    result = apply_file_edits(validated_path, edit_dicts, dryRun)
-    return result
+    
+    # Set default values
+    if replacements is None:
+        replacements = {}
+    if inserts is None:
+        inserts = {}
+    
+    # Read the original file
+    try:
+        with open(validated_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
+    
+    # Make a copy of original content to modify
+    new_content = content
+    
+    # Keep track of operations for reporting
+    operations = {
+        "replace": 0,
+        "insert": 0,
+        "errors": []
+    }
+    
+    # Process replacements
+    for old_text, new_text in replacements.items():
+        if not old_text:
+            operations["errors"].append("Error: Empty string cannot be used as a replacement key")
+            continue
+            
+        # Handle newline differences
+        old_text_normalized = old_text.replace('\r\n', '\n')
+        new_content_normalized = new_content.replace('\r\n', '\n')
+        
+        # Check if the text exists in the file
+        if old_text_normalized not in new_content_normalized:
+            operations["errors"].append(f"Error: Text to replace not found: {old_text[:50]}...")
+            continue
+        
+        # Apply replacement
+        if not dry_run:
+            if replace_all:
+                # Replace all occurrences
+                count_before = new_content_normalized.count(old_text_normalized)
+                new_content = new_content.replace(old_text, new_text)
+                operations["replace"] += count_before
+            else:
+                # Replace only first occurrence
+                pos = new_content_normalized.find(old_text_normalized)
+                if pos >= 0:
+                    # Get original string encoding (not normalized)
+                    actual_old_text = new_content[pos:pos + len(old_text)]
+                    new_content = new_content.replace(actual_old_text, new_text, 1)
+                    operations["replace"] += 1
+    
+    # Process insertions
+    for anchor_text, insert_text in inserts.items():
+        if anchor_text is None or anchor_text == "":
+            # Insert at the BEGINNING of the file
+            if not dry_run:
+                new_content = insert_text + new_content
+            operations["insert"] += 1
+            continue
+            
+        # Handle newline differences
+        anchor_text_normalized = anchor_text.replace('\r\n', '\n')
+        new_content_normalized = new_content.replace('\r\n', '\n')
+        
+        # Check if the anchor text exists in the file
+        if anchor_text_normalized not in new_content_normalized:
+            operations["errors"].append(f"Error: Anchor text for insertion not found: {anchor_text[:50]}...")
+            continue
+            
+        if not dry_run:
+            if replace_all:
+                # Insert after each occurrence of the anchor text
+                parts = []
+                remainder = new_content
+                remainder_normalized = remainder.replace('\r\n', '\n')
+                
+                while anchor_text_normalized in remainder_normalized:
+                    # Find the position in the normalized text
+                    pos = remainder_normalized.find(anchor_text_normalized)
+                    
+                    # Map to the original text position
+                    actual_anchor_end = pos + len(anchor_text)
+                    
+                    # Add the part before and including the anchor
+                    parts.append(remainder[:actual_anchor_end])
+                    
+                    # Add the insertion
+                    parts.append(insert_text)
+                    
+                    # Continue with the remainder
+                    remainder = remainder[actual_anchor_end:]
+                    remainder_normalized = remainder.replace('\r\n', '\n')
+                    
+                    operations["insert"] += 1
+                
+                # Add any remaining content
+                parts.append(remainder)
+                
+                # Combine all parts
+                new_content = "".join(parts)
+            else:
+                # Insert after first occurrence only
+                pos = new_content_normalized.find(anchor_text_normalized)
+                if pos >= 0:
+                    # Find the end of the actual anchor text in the original string
+                    actual_end_pos = pos + len(anchor_text)
+                    
+                    # Insert the new text after the anchor
+                    new_content = new_content[:actual_end_pos] + insert_text + new_content[actual_end_pos:]
+                    operations["insert"] += 1
+    
+    # Write the modified content if not in dry run mode and no errors occurred
+    if not dry_run and not operations["errors"]:
+        try:
+            with open(validated_path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+        except Exception as e:
+            return f"Error writing to file: {str(e)}"
+    
+    # Create a summary of changes
+    if operations["errors"]:
+        return "Errors occurred during edit:\n" + "\n".join(operations["errors"])
+    else:
+        changes = []
+        for op_type, count in operations.items():
+            if op_type != "errors" and count > 0:
+                changes.append(f"{count} {op_type} operation{'s' if count > 1 else ''}")
+        
+        action = "Validated" if dry_run else "Applied"
+        if changes:
+            return f"{action} {', '.join(changes)} to {path}"
+        else:
+            return f"No changes were made to {path}"
 
+
+@mcp.tool()
+def edit_file_diff_line(path: str, edits: Dict[str, str], dry_run: bool = False) -> str:
+    """
+    Edit a file using a diff approach specifying exact line number locations.
+    Note that all line numbers refer to the original file before any edits.
+    Line numbers start at 1.
+    Prefer using `edit_file_diff`, unless you know the exact line number locations for each edit operation.
+    
+    Args:
+        path: Path to the file to edit
+        edits: Dictionary of edits with the following pattern:
+          - "N": Replace line N with the provided content
+          - "N-M": Replace lines N through M with the provided content 
+                   (empty string removes the lines)
+          - "Ni": Insert the provided content after line N 
+                  (use "0i" to insert at the beginning)
+          - "a": Append the provided content at the end of the file
+        dry_run: If True, only validate but don't apply changes
+        
+    Returns:
+        A message indicating the changes applied or validation result
+    
+    Example:
+        edit_file("myfile.py", {
+            "5": "def new_function():\\n",       # Replace line 5
+            "10-12": "# New content\\n",         # Replace lines 10-12
+            "6-8": "",                          # Delete lines 6-8
+            "0i": "# File header\\n",            # Insert at the beginning
+            "15i": "# Insert after line 15\\n",   # Insert after line 15
+            "a": "# End of file\\n"              # Append to the end
+            "7": "\\n"                           # Replace line 7 with empty line
+        })
+    """
+    validated_path = validate_path(path)
+    
+    # Read the original file
+    try:
+        with open(validated_path, 'r', encoding='utf-8') as f:
+            original_lines = f.readlines()
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
+    
+    # Make a copy of original lines to modify
+    new_lines = original_lines.copy()
+    
+    # Parse edits into structured format with consistent fields
+    structured_edits = []
+    errors = []
+    
+    for line_spec, content in edits.items():
+        # Handle special append case
+        if line_spec.lower() == "a":
+            structured_edits.append({
+                "type": "insert",
+                "start": len(new_lines),  # Insert after the last line
+                "content": content
+            })
+            continue
+            
+        # Handle insertion with "Ni" pattern
+        if line_spec.endswith("i"):
+            try:
+                line_num = int(line_spec[:-1])
+                if line_num < 0 or line_num > len(new_lines):
+                    errors.append(f"Error: Line number {line_num} out of range (0-{len(new_lines)}) for insertion")
+                    continue
+                    
+                structured_edits.append({
+                    "type": "insert",
+                    "start": line_num,
+                    "content": content
+                })
+            except ValueError:
+                errors.append(f"Error: Invalid insertion specification '{line_spec}'. Must be in format 'Ni' where N is a line number.")
+            continue
+            
+        # Handle replacement (either single line or range)
+        if "-" in line_spec:
+            # Range specified
+            try:
+                line_start, line_end = map(int, line_spec.split("-"))
+                
+                if line_start < 1 or line_start > len(new_lines):
+                    errors.append(f"Error: Start line {line_start} out of range (1-{len(new_lines)}) for replacement")
+                    continue
+                    
+                if line_end < 1 or line_end > len(new_lines):
+                    errors.append(f"Error: End line {line_end} out of range (1-{len(new_lines)}) for replacement")
+                    continue
+                    
+                if line_end < line_start:
+                    errors.append(f"Error: End line {line_end} is before start line {line_start}")
+                    continue
+                    
+                structured_edits.append({
+                    "type": "replace",
+                    "start": line_start,
+                    "end": line_end,
+                    "content": content
+                })
+            except ValueError:
+                errors.append(f"Error: Invalid line range specification '{line_spec}'. Must be in format 'N-M' where N, M are line numbers.")
+        else:
+            # Single line specified
+            try:
+                line_num = int(line_spec)
+                
+                if line_num < 1 or line_num > len(new_lines):
+                    errors.append(f"Error: Line number {line_num} out of range (1-{len(new_lines)}) for replacement")
+                    continue
+                    
+                structured_edits.append({
+                    "type": "replace",
+                    "start": line_num,
+                    "end": line_num,
+                    "content": content
+                })
+            except ValueError:
+                errors.append(f"Error: Invalid line number '{line_spec}'. Must be an integer.")
+    
+    # Return early if there are parsing errors
+    if errors:
+        return "Errors occurred during parsing:\n" + "\n".join(errors)
+    
+    # Sort edits by line number (descending) to process from bottom to top
+    structured_edits.sort(key=lambda e: e["start"], reverse=True)
+    
+    # Keep track of operations for reporting
+    operations = {
+        "replace": 0,
+        "insert": 0,
+        "errors": []
+    }
+    
+    # Process edits
+    for edit in structured_edits:
+        edit_type = edit["type"]
+        
+        if edit_type == "replace":
+            line_start = edit["start"]
+            line_end = edit["end"]
+            content = edit["content"]
+            
+            # Prepare content lines
+            content_lines = []
+            if content:
+                content_lines = content.splitlines(True)  # Keep the line endings
+                
+                # Ensure all lines end with newline except possibly the last one
+                for i in range(len(content_lines)):
+                    if i < len(content_lines) - 1 and not content_lines[i].endswith('\n'):
+                        content_lines[i] += '\n'
+                
+                # Make sure the last line has a newline if the file had one
+                if content_lines and not content_lines[-1].endswith('\n'):
+                    if line_end < len(new_lines) and new_lines[line_end-1].endswith('\n'):
+                        content_lines[-1] += '\n'
+            
+            if not dry_run:
+                # Replace the specified lines (adjust for 0-indexed list)
+                new_lines[line_start-1:line_end] = content_lines
+                
+            operations["replace"] += 1
+            
+        elif edit_type == "insert":
+            line_num = edit["start"]
+            content = edit["content"]
+            
+            # Prepare content lines
+            content_lines = []
+            if content:
+                content_lines = content.splitlines(True)
+                
+                # Ensure all lines end with newline except possibly the last one
+                for i in range(len(content_lines)):
+                    if i < len(content_lines) - 1 and not content_lines[i].endswith('\n'):
+                        content_lines[i] += '\n'
+                
+                # Make sure the last line has a newline if inserting in the middle of the file
+                if content_lines and not content_lines[-1].endswith('\n'):
+                    if line_num < len(new_lines) and line_num > 0 and new_lines[0].endswith('\n'):
+                        content_lines[-1] += '\n'
+            
+            if not dry_run:
+                # Insert at the specified position
+                if line_num == 0:
+                    # Insert at the beginning
+                    new_lines[0:0] = content_lines
+                else:
+                    # Insert after the specified line (adjust for 0-indexed list)
+                    new_lines[line_num:line_num] = content_lines
+                
+            operations["insert"] += 1
+    
+    # Write the modified content if not in dry run mode and no errors occurred
+    if not dry_run and not operations["errors"]:
+        try:
+            with open(validated_path, 'w', encoding='utf-8') as f:
+                f.writelines(new_lines)
+        except Exception as e:
+            return f"Error writing to file: {str(e)}"
+    
+    # Create a summary of changes
+    if operations["errors"]:
+        return "Errors occurred during edit:\n" + "\n".join(operations["errors"])
+    else:
+        changes = []
+        for op_type, count in operations.items():
+            if op_type != "errors" and count > 0:
+                changes.append(f"{count} {op_type} operation{'s' if count > 1 else ''}")
+        
+        action = "Validated" if dry_run else "Applied"
+        if changes:
+            return f"{action} {', '.join(changes)} to {path}"
+        else:
+            return f"No changes were made to {path}"
+    
 @mcp.tool()
 def create_directory(path: str) -> str:
     """
@@ -620,42 +912,92 @@ def list_directory(path: str) -> str:
     return "\n".join(formatted)
 
 @mcp.tool()
-def directory_tree(path: str, count_lines: bool = False) -> str:
+def directory_tree(path: str, count_lines: bool = False, show_permissions: bool = False, 
+                  show_owner: bool = False, show_size: bool = False) -> str:
     """
-    Get a recursive tree view of files and directories in plaintext format.
-    Each entry is displayed with proper indentation and tree structure.
+    Get a recursive listing of files and directories with optional metadata.
     
     Args:
         path: Path to the directory to display
         count_lines: Whether to include the number of lines for each file (default: False)
+        show_permissions: Whether to show file permissions (default: False)
+        show_owner: Whether to show file ownership information (default: False)
+        show_size: Whether to show file sizes (default: False)
         
     Returns:
-        A plaintext tree representation of directories and files
+        A text representation of directories and files with full paths and requested metadata
     """
     validated_path = validate_path(path)
+    output_lines = []
     
-    # Get the directory name for the root node
-    root_name = os.path.basename(validated_path.rstrip('/\\'))
-    if not root_name:  # In case of root directory
-        root_name = validated_path
+    def process_directory(current_path):
+        result = []
+        
+        try:
+            entries = sorted(os.listdir(current_path))
+        except PermissionError:
+            return [f"{current_path} [Permission denied]"]
+        except Exception as e:
+            return [f"{current_path} [Error: {str(e)}]"]
+        
+        # Add the directory itself with trailing slash
+        metadata = get_metadata(
+            current_path, 
+            False, 
+            count_lines, 
+            show_permissions, 
+            show_owner, 
+            show_size
+        )
+        dir_entry = current_path + "/"
+        if metadata:
+            dir_entry += f" [{metadata}]"
+        result.append(dir_entry)
+        
+        # Process all children
+        for entry in entries:
+            entry_path = os.path.join(current_path, entry)
+            
+            if os.path.isdir(entry_path):
+                # Process directories recursively
+                result.extend(process_directory(entry_path))
+            else:
+                # Process files
+                metadata = get_metadata(
+                    entry_path, 
+                    True, 
+                    count_lines, 
+                    show_permissions, 
+                    show_owner, 
+                    show_size
+                )
+                file_entry = entry_path
+                if metadata:
+                    file_entry += f" [{metadata}]"
+                result.append(file_entry)
+        
+        return result
     
-    # Use the common formatter
-    return format_directory_tree(validated_path, root_name, None, count_lines)
+    # Process the root directory and all its contents
+    output_lines = process_directory(validated_path)
+    return "\n".join(output_lines)
 
 
 @mcp.tool()
-def git_directory_tree(path: str, count_lines: bool = False) -> str:
+def git_directory_tree(path: str, count_lines: bool = False, show_permissions: bool = False, 
+                      show_owner: bool = False, show_size: bool = False) -> str:
     """
-    Get a directory tree for a git repository in plaintext format,
-    properly respecting .gitignore rules. Uses native Git commands
-    to ensure correct handling of nested .gitignore files.
+    Get a recursive listing of git-tracked files and directories with optional metadata.
     
     Args:
         path: Path to the git repository directory
         count_lines: Whether to include the number of lines for each file (default: False)
+        show_permissions: Whether to show file permissions (default: False)
+        show_owner: Whether to show file ownership information (default: False)
+        show_size: Whether to show file sizes (default: False)
         
     Returns:
-        A plaintext tree representation of tracked files in the git repository
+        A text representation of git-tracked files with full paths and requested metadata
     """
     import shutil
     from pathlib import Path
@@ -692,6 +1034,14 @@ def git_directory_tree(path: str, count_lines: bool = False) -> str:
         os.chdir(validated_path)
         
         try:
+            # git config --global --add safe.directory /path
+            subprocess.run(
+                [git_cmd, 'config', '--global', '--add', 'safe.directory', validated_path], 
+                capture_output=False, 
+                text=False,
+                check=False
+            )
+            
             # Run git ls-files to get all tracked files
             result = subprocess.run(
                 [git_cmd, 'ls-files'], 
@@ -700,25 +1050,43 @@ def git_directory_tree(path: str, count_lines: bool = False) -> str:
                 check=True
             )
             
-            git_files = set(result.stdout.strip().split('\n'))
-            if not git_files or (len(git_files) == 1 and next(iter(git_files)) == ''):
+            git_files = list(result.stdout.strip().split('\n'))
+            if not git_files or (len(git_files) == 1 and not git_files[0]):
                 return "No tracked files found in the repository."
             
-            # Define file filter function for git tracked files
-            def is_git_tracked(rel_path):
-                # Convert Windows path separators to Unix style for git
-                rel_path = rel_path.replace('\\', '/')
-                return rel_path in git_files
+            # Add repository root as the first entry
+            output_lines = [f"{validated_path}/ [git repository root]"]
             
-            # Get the repository name for the root node
-            repo_name = os.path.basename(validated_path.rstrip('/\\'))
-            if not repo_name:  # In case of root directory
-                repo_name = validated_path
+            # Collect tracked files
+            for rel_file in git_files:
+                if not rel_file:  # Skip empty lines
+                    continue
+                    
+                # Skip .git directory and its contents
+                if rel_file.startswith('.git/'):
+                    continue
                 
-            repo_name += " (git repository)"
+                file_path = os.path.join(validated_path, rel_file)
+                
+                # Get and add metadata
+                if os.path.exists(file_path):
+                    metadata = get_metadata(
+                        file_path, 
+                        True, 
+                        count_lines, 
+                        show_permissions, 
+                        show_owner, 
+                        show_size
+                    )
+                    if metadata:
+                        output_lines.append(f"{file_path} [{metadata}]")
+                    else:
+                        output_lines.append(file_path)
+                else:
+                    # Handle case where file is tracked but doesn't exist locally
+                    output_lines.append(f"{file_path} [tracked but missing]")
             
-            # Use the common formatter with git file filter
-            return format_directory_tree(validated_path, repo_name, is_git_tracked, count_lines)
+            return "\n".join(output_lines)
             
         finally:
             # Ensure we change back to the original directory even if an error occurs
