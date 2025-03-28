@@ -4,14 +4,16 @@ A Python server implementing Model Context Protocol (MCP) for secure filesystem 
 
 ## Features
 
-- Read/write files
-- Create/list directories
+- Read/write files with multiple access methods (whole file, line ranges, keyword-based)
+- Create/list directories and file trees
 - Move files/directories
-- Search files
-- Diff edits
-- Get file metadata
-- Git-aware directory tree listing
-- Function/keyword search in files
+- Search files by name and content
+- Perform diff-based edits with preview support
+- Get detailed file metadata (size, permissions, ownership)
+- Git-aware directory tree listing respecting .gitignore
+- Function/keyword search in files with contextual results
+- Multi-file read operations
+- Path validation and security checks
 
 **Note**: The server only allows operations within directories specified via command-line arguments.
 
@@ -73,6 +75,7 @@ Note: All directories are mounted to `/projects` by default. Adding the `,ro` fl
   - `after` (int): Lines to include after match (default: 0)
   - `use_regex` (bool): Use regex pattern (default: false)
   - `ignore_case` (bool): Case-insensitive search (default: false)
+- Returns matching lines with ">" prefix and line numbers
 
 ### read_function_by_keyword
 - Extract function definitions by keyword
@@ -88,15 +91,27 @@ Note: All directories are mounted to `/projects` by default. Adding the `,ro` fl
   - `path` (string)
   - `content` (string)
 
-### edit_file
-- Make surgical edits to a file
+### edit_file_diff
+- Make surgical edits to a file without specifying line numbers
 - Inputs:
   - `path` (string)
-  - `edits` (array): List of edit operations
-    - `oldText` (string): Text to search for
-    - `newText` (string): Text to replace with
-  - `dryRun` (boolean): Preview changes without applying (default: false)
-- Returns a unified diff showing changes
+  - `replacements` (object): Dictionary with keys as content to find and values as replacement content
+  - `inserts` (object): Dictionary for inserting content after specified anchor text
+  - `replace_all` (boolean): Replace all occurrences or just first match (default: true)
+  - `dry_run` (boolean): Preview changes without applying (default: false)
+- Returns a summary of changes made
+
+### edit_file_diff_line
+- Edit a file with precise line number specifications
+- Inputs:
+  - `path` (string)
+  - `edits` (object): Dictionary of edits with keys as line specifiers and values as content
+    - "N": Replace line N with provided content
+    - "N-M": Replace lines N through M with provided content
+    - "Ni": Insert content after line N (use "0i" for beginning)
+    - "a": Append content to end of file
+  - `dry_run` (boolean): Preview changes without applying (default: false)
+- Returns a summary of applied changes
 
 ### create_directory
 - Create directory or ensure it exists
@@ -108,16 +123,22 @@ Note: All directories are mounted to `/projects` by default. Adding the `,ro` fl
 - Input: `path` (string)
 
 ### directory_tree
-- Get a recursive tree view of files and directories
+- Get a recursive tree view of files and directories with metadata
 - Inputs:
   - `path` (string)
   - `count_lines` (boolean): Include line counts (default: false)
+  - `show_permissions` (boolean): Show file permissions (default: false)
+  - `show_owner` (boolean): Show file ownership information (default: false)
+  - `show_size` (boolean): Show file sizes (default: false)
 
 ### git_directory_tree
 - Get a directory tree for a git repository respecting .gitignore
 - Inputs:
   - `path` (string)
   - `count_lines` (boolean): Include line counts (default: false)
+  - `show_permissions` (boolean): Show file permissions (default: false)
+  - `show_owner` (boolean): Show file ownership information (default: false)
+  - `show_size` (boolean): Show file sizes (default: false)
 
 ### move_file
 - Move or rename files and directories
@@ -129,8 +150,9 @@ Note: All directories are mounted to `/projects` by default. Adding the `,ro` fl
 - Recursively search for files/directories matching a pattern
 - Inputs:
   - `path` (string): Starting directory
-  - `pattern` (string): Search pattern
+  - `pattern` (string): Search pattern (case-insensitive)
   - `excludePatterns` (string[]): Glob patterns to exclude
+- Returns full paths to all matching files and directories
 
 ### get_file_info
 - Get detailed file metadata
@@ -142,13 +164,21 @@ Note: All directories are mounted to `/projects` by default. Adding the `,ro` fl
 
 ## Security
 
-The server maintains a whitelist of allowed directories and performs strict path validation to prevent unauthorized access. Symlink targets are validated to ensure they don't escape the allowed directories.
+The server implements comprehensive security measures:
+
+- Maintains a whitelist of allowed directories specified via command-line arguments
+- Performs strict path validation to prevent unauthorized access outside allowed directories 
+- Validates symlink targets to ensure they don't escape the allowed directories
+- Handles circular symlinks and invalid paths gracefully
+- Verifies parent directories for non-existent paths to ensure they're within allowed boundaries
 
 ## Requirements
 
 - Python 3.12+
 - MCP 1.5.0+
 - Docker
+- httpx 0.28.1+
+- Git (optional, for git_directory_tree)
 
 ## License
 
